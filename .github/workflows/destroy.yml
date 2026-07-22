@@ -1,0 +1,83 @@
+name: Destroy on-prem lab
+
+# Deletes every RESOURCE inside RG-INFRA-LAB-EPHEMERAL, but leaves the empty
+# resource group shell standing. This is deliberate: the pipeline identity's
+# role assignment is scoped to this RG's existence - deleting the RG itself
+# would destroy that scope too, requiring a manual re-grant before every
+# future deploy. An empty RG costs nothing, so there's no downside to
+# leaving it in place. The persistent DC and Sentinel core live
+# elsewhere entirely and are NOT affected either way.
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type DESTROY to confirm'
+        required: true
+        default: ''
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  RESOURCE_GROUP: RG-INFRA-LAB-EPHEMERAL
+
+jobs:
+  destroy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check confirmation
+        run: |
+          if [ "${{ inputs.confirm }}" != "DESTROY" ]; then
+            echo "Confirmation not matched. Aborting."
+            exit 1
+          fi
+
+      - name: Azure login (federated / passwordless)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Delete all resources inside the resource group (RG itself remains)
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            # Staged deletion, in dependency order. A flat, unordered delete
+            # of every resource fails intermittently: NICs can't be removed
+            # while still attached to a VM, and the NSG can't be removed
+            # while still associated with the VNet's subnet. Deleting in
+            # explicit stages - VMs, then everything else except the network
+            # foundation, then Bastion, then the VNet, then the NSG last -
+            # avoids both races entirely.
+
+            echo "--- Stage 1: virtual machines ---"
+            VM_IDS=$(az resource list -g "$RESOURCE_GROUP" --resource-type Microsoft.Compute/virtualMachines --query "[].id" -o tsv)
+            if [ -n "$VM_IDS" ]; then
+              echo "$VM_IDS" | xargs -r az resource delete --ids
+            else
+              echo "No VMs found."
+            fi
+
+            echo "--- Waiting for NIC detachment to propagate ---"
+            sleep 30
+
+            echo "--- Stage 2: everything except Bastion, VNet, and NSG ---"
+            REMAINING_IDS=$(az resource list -g "$RESOURCE_GROUP" --query "[?type!='Microsoft.Network/bastionHosts' && type!='Microsoft.Network/virtualNetworks' && type!='Microsoft.Network/networkSecurityGroups'].id" -o tsv)
+            if [ -n "$REMAINING_IDS" ]; then
+              echo "$REMAINING_IDS" | xargs -r -n1 az resource delete --ids
+            else
+              echo "Nothing left in stage 2."
+            fi
+
+            echo "--- Stage 3: Bastion ---"
+            az network bastion delete -g "$RESOURCE_GROUP" -n BAS-EPH --yes || echo "Bastion already gone or never existed."
+
+            echo "--- Stage 4: VNet (frees the NSG's subnet association) ---"
+            az network vnet delete -g "$RESOURCE_GROUP" -n VNET-EPH || echo "VNet already gone or never existed."
+
+            echo "--- Stage 5: NSG (only deletable once nothing references it) ---"
+            az network nsg delete -g "$RESOURCE_GROUP" -n NSG-EPH || echo "NSG already gone or never existed."
+
+            echo "All resources deleted. $RESOURCE_GROUP shell remains - role assignment scope preserved."

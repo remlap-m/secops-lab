@@ -1,0 +1,14 @@
+#cloud-config
+# Runs once at first boot of VM-EPH-LNX01. Base packages only - MDE-for-Linux
+# onboarding is a manual, tenant-specific step (see Onboard-MDE-Linux.sh),
+# same reasoning as the Windows onboarding: cannot be baked in, and manual
+# onboarding avoids device-identity issues if this disk is ever cloned.
+package_update: true
+packages:
+  - auditd
+  - curl
+  - gnupg
+
+runcmd:
+  - systemctl enable auditd
+  - systemctl start auditd

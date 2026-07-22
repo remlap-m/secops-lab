@@ -1,0 +1,39 @@
+name: Power on-prem lab VMs
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Power action'
+        type: choice
+        options:
+          - start
+          - deallocate
+        default: deallocate
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  RESOURCE_GROUP: RG-INFRA-LAB-EPHEMERAL
+
+jobs:
+  power:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Azure login (federated / passwordless)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: ${{ inputs.action }} all VMs
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            ids=$(az vm list -g "$RESOURCE_GROUP" --query "[].id" -o tsv)
+            if [ -z "$ids" ]; then echo "No VMs found in $RESOURCE_GROUP."; exit 0; fi
+            az vm ${{ inputs.action }} --ids $ids
+            echo "${{ inputs.action }} complete."

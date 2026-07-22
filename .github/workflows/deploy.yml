@@ -1,0 +1,53 @@
+name: Deploy on-prem lab
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  RESOURCE_GROUP: RG-INFRA-LAB-EPHEMERAL
+  LOCATION: westeurope
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Azure login (federated / passwordless)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Ensure resource group exists
+        uses: azure/cli@v2
+        with:
+          inlineScript: |
+            az group create \
+              --name "$RESOURCE_GROUP" \
+              --location "$LOCATION" \
+              --tags env=lab domain=eph.internal autoDelete=true
+
+      - name: Deploy Bicep
+        uses: azure/cli@v2
+        env:
+          LAB_ADMIN_PASSWORD: ${{ secrets.LAB_ADMIN_PASSWORD }}
+          LAB_SAFEMODE_PASSWORD: ${{ secrets.LAB_SAFEMODE_PASSWORD }}
+        with:
+          inlineScript: |
+            az deployment group create \
+              --resource-group "$RESOURCE_GROUP" \
+              --template-file main.bicep \
+              --parameters main.bicepparam
+
+      - name: Reminder
+        run: |
+          echo "Deployment submitted. DC promotes + reboots, then CA/file server/clients retry-join (up to ~30 min)."
+          echo "If a VM did not join, re-run this workflow - the scripts are idempotent."
+          echo "Then work through the first-login checklist per VM in the README (MDE, Sysmon, CA role, honeytoken, file share)."
+          echo "Connect via Azure Bastion Developer in the portal - no public IPs exist on any VM."
